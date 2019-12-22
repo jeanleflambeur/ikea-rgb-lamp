@@ -26,8 +26,15 @@ String s_client_id;
 WiFiClient s_wifi_client;
 PubSubClient s_mqtt_client(s_wifi_client);
 
-const char* s_status_topic = "/home/disco_ikea_rgb_lamp/status";
-const char* s_color_topic = "/home/disco_ikea_rgb_lamp/color";
+#define NODE_LOCATION "home"
+#define NODE_TYPE "ikea_rgb"
+#define NODE_NAME "disco_light"
+
+const char* s_status_topic = "/"NODE_LOCATION"/"NODE_NAME"/status";
+const char* s_switch_topic = "/"NODE_LOCATION"/"NODE_NAME"/switch";
+
+const char* s_color_topic = "/"NODE_LOCATION"/"NODE_NAME"/color";
+const char* s_color_set_topic = "/"NODE_LOCATION"/"NODE_NAME"/color/set";
 
 bool s_status = true;
 int32_t s_last_interpolation_tp = 0;
@@ -65,7 +72,7 @@ Color clamp(Color color, Color _min, Color _max)
 void mqtt_publish(const char* topic, const Color& c)
 {
   char buffer[128] = {0};
-  sprintf(buffer, "%.3f,%.3f,%.3f", c.r, c.g, c.b);
+  sprintf(buffer, "%d,%d,%d", (int)(c.r*255.f), (int)(c.g*255.f), (int)(c.b*255.f));
   s_mqtt_client.publish(topic, buffer, strlen(buffer));
 }
 void mqtt_publish(const char* topic, float t)
@@ -146,21 +153,18 @@ void set_color(const Color& color)
   FastLED.show();
 }  
 
-void set_target_color(const Color& color, bool publish)
+void set_target_color(const Color& color)
 {
   Color c;
   c.r = clamp(color.r, 0.f, 1.f);
   c.g = clamp(color.g, 0.f, 1.f);
   c.b = clamp(color.b, 0.f, 1.f);
 
-  if (publish)
+  if (fabs(s_target_color.r - c.r) > 0.00001f ||
+      fabs(s_target_color.g - c.g) > 0.00001f ||
+      fabs(s_target_color.b - c.b) > 0.00001f)
   {
-    if (fabs(s_target_color.r - c.r) > 0.00001f ||
-        fabs(s_target_color.g - c.g) > 0.00001f ||
-        fabs(s_target_color.b - c.b) > 0.00001f)
-    {
-      mqtt_publish(s_color_topic, c);
-    }
+    mqtt_publish(s_color_topic, c);
   }
 
   s_target_color = c;
@@ -178,10 +182,10 @@ void save_color(const Color& color)
 
 void load_color()
 {
-  set_target_color(s_saved_color, true);
+  set_target_color(s_saved_color);
 }
 
-void set_status(bool status, bool publish)
+void set_status(bool status)
 {
   if (status == s_status)
   {
@@ -191,22 +195,16 @@ void set_status(bool status, bool publish)
   if (status == false)
   {
     s_status = status;
-    if (publish)
-    {
-      mqtt_publish(s_status_topic, s_status);
-    }
+    mqtt_publish(s_status_topic, s_status);
     
     save_color();
-    set_target_color({ 0, 0, 0 }, true);
+    set_target_color({ 0, 0, 0 });
     Serial.println("Turning off");
   }
   else
   {
     s_status = status;
-    if (publish)
-    {
-      mqtt_publish(s_status_topic, s_status);
-    }
+    mqtt_publish(s_status_topic, s_status);
     
     load_color();
     Serial.println("Turning on");
@@ -216,7 +214,7 @@ void set_status(bool status, bool publish)
 void mqtt_callback(char* topic, byte* payload, unsigned int length) 
 {
   char buffer[128] = { 0, };
-  length = min(length, 127u);
+  length = min(length, 126u);
   memcpy(buffer, payload, length);
   buffer[length] = 0;
 
@@ -229,18 +227,18 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length)
   Serial.print("'");
   Serial.println();
   
-  if (strcmp(topic, s_status_topic) == 0)
+  if (strcmp(topic, s_switch_topic) == 0)
   {
-    set_status(strcmp(buffer, "true") == 0, false);
+    set_status(strcmp(buffer, "true") == 0);
   }
-  if (strcmp(topic, s_color_topic) == 0)
+  if (strcmp(topic, s_color_set_topic) == 0)
   {
     size_t index = 0;
     float values[3];
     char* pch = strtok(buffer," ,");
     while (pch != NULL && index < 3)
     {
-      float v = atof(pch);
+      float v = atoi(pch) / 255.f;
       values[index++] = isnan(v) ? 0.f : v;
       pch = strtok(NULL, " ,");
     }
@@ -251,7 +249,7 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length)
 
     if (s_status)
     {
-      set_target_color(c, false);
+      set_target_color(c);
     }
   }
 }
@@ -268,11 +266,11 @@ void reconnect_mqtt()
       Serial.println("connected");
 
       // Once connected, publish an announcement...
-      //mqtt_publish(s_status_topic, s_status);
-      //mqtt_publish(s_color_topic, s_target_color);
+      mqtt_publish(s_status_topic, s_status);
+      mqtt_publish(s_color_topic, s_target_color);
       // ... and resubscribe
-      s_mqtt_client.subscribe(s_status_topic);
-      s_mqtt_client.subscribe(s_color_topic);
+      s_mqtt_client.subscribe(s_switch_topic);
+      s_mqtt_client.subscribe(s_color_set_topic);
     } 
     else 
     {
@@ -315,8 +313,17 @@ void setup()
   FastLED.addLeds<WS2812B, LED_DATA_PIN, GRB>(s_leds, LED_COUNT).setCorrection(TypicalSMD5050); 
   FastLED.setDither();
 
-  s_client_id = "disco-ikea-rgb-lamp-";
+  s_client_id = NODE_LOCATION"/"NODE_NAME"/"NODE_TYPE"/";
   s_client_id += String(random(0xffff), HEX);
+
+  Serial.print("Node location: "); Serial.println(NODE_LOCATION);
+  Serial.print("Node type: "); Serial.println(NODE_TYPE);
+  Serial.print("Node name: "); Serial.println(NODE_NAME);
+  Serial.print("Client ID: "); Serial.println(s_client_id.c_str());
+  Serial.print("MQTT status topic: "); Serial.println(s_status_topic);
+  Serial.print("MQTT switch topic: "); Serial.println(s_switch_topic);
+  Serial.print("MQTT color topic: "); Serial.println(s_color_topic);
+  Serial.print("MQTT color set topic: "); Serial.println(s_color_set_topic);
 
   setup_wifi();
   s_mqtt_client.setServer(MQTT_SERVER, MQTT_PORT);
